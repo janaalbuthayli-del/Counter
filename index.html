@@ -71,10 +71,13 @@ input[type=range]{width:100%;accent-color:var(--acc)}
     <div class="sec" style="margin-top:16px">
       <h2>تنزيل الفيديو</h2>
       <div class="exp">
-        <button class="btn pri" id="exAlpha">فيديو شفاف (WebM)<small>بدون خلفية · يشتغل من Chrome أو Edge (كمبيوتر أو أندرويد)</small></button>
+        <button class="btn pri" id="exGif">صورة متحركة شفافة (GIF)<small>للآيفون وكانفا · بدون خلفية · يوقف على الرقم النهائي</small></button>
+        <button class="btn" id="exAlpha">فيديو شفاف (WebM)<small>بدون خلفية · يشتغل من Chrome أو Edge (كمبيوتر أو أندرويد)</small></button>
         <button class="btn" id="exGreen">فيديو بخلفية خضراء (MP4)<small>للمونتاج من الجوال: شيل الخلفية بأداة Chroma Key</small></button>
         <button class="btn" id="exPng">صور PNG شفافة (ZIP)<small>تسلسل صور لبرامج Premiere وAfter Effects وFinal Cut وDaVinci</small></button>
       </div>
+      <div class="f" style="margin-top:10px"><label>مقاس الـ GIF</label><select id="gifSize"><option value="540">540 (أخف)</option><option value="720" selected>720</option><option value="1080">1080 (أوضح، أثقل)</option></select></div>
+      <div class="note">في الـ GIF الحلقة الخلفية الباهتة ما تطلع لأن GIF ما يدعم نص الشفافية. إذا تبيها، ارفع شفافيتها فوق 50%.</div>
       <div class="status" id="st"></div>
       <div class="bar" id="bar"><i id="barI"></i></div>
       <div class="note">خلّ الصفحة مفتوحة وقدّامك وقت تسجيل الفيديو. التسجيل ياخذ نفس مدة العداد.</div>
@@ -218,7 +221,7 @@ $('play').onclick=play;
 let dl=null;
 (async()=>{try{dl=window.claude?await window.claude.use('downloads'):null}catch(e){dl=null}})();
 function status(msg,prog){$('st').textContent=msg;$('bar').style.display=prog==null?'none':'block';if(prog!=null)$('barI').style.width=(prog*100)+'%'}
-function busy(b){['exAlpha','exGreen','exPng','play'].forEach(id=>$(id).disabled=b)}
+function busy(b){['exGif','exAlpha','exGreen','exPng','play'].forEach(id=>$(id).disabled=b)}
 function fname(ext){const base=(o.title.trim()||o.unit.trim()||'عداد').replace(/[\\/:*?"<>|]/g,'')+'_'+String(o.value).replace(/[^\d.]/g,'');return base+'.'+ext}
 async function save(blob,ext){
   if(!dl){try{dl=window.claude?await window.claude.use('downloads'):null}catch(e){}}
@@ -265,6 +268,48 @@ async function exportPng(){
   render(1);busy(false);
   await save(blob,'zip');
 }
+/* ---------- transparent GIF (works on iPhone; Canva accepts GIF transparency) ---------- */
+function lzwEncode(idx,out){
+  const MIN=8,CLEAR=256,EOI=257;let size=9,next=258,table=new Map(),cur=0,shift=0;const buf=[];
+  const emit=c=>{cur|=c<<shift;shift+=size;while(shift>=8){buf.push(cur&255);cur>>>=8;shift-=8}};
+  emit(CLEAR);let pre=idx[0];
+  for(let i=1;i<idx.length;i++){const k=idx[i],key=pre<<8|k,c=table.get(key);
+    if(c===undefined){emit(pre);
+      if(next===4096){emit(CLEAR);next=258;size=9;table=new Map()}
+      else{if(next>=(1<<size))size++;table.set(key,next++)}
+      pre=k}else pre=c}
+  emit(pre);emit(EOI);if(shift>0)buf.push(cur&255);
+  out.push(MIN);for(let i=0;i<buf.length;i+=255){const n=Math.min(255,buf.length-i);out.push(n);for(let j=0;j<n;j++)out.push(buf[i+j])}out.push(0);
+}
+async function exportGif(){
+  busy(true);
+  const G=+($('gifSize')?.value||720),FPSG=25,nA=Math.max(2,Math.round(+o.dur*FPSG)),holdCs=Math.min(65535,Math.round(Math.max(+o.hold,30)*100));
+  const oc=document.createElement('canvas');oc.width=oc.height=G;const ox=oc.getContext('2d',{willReadFrequently:true});
+  const grab=t=>{render(t);ox.clearRect(0,0,G,G);ox.drawImage(cv,0,0,G,G);return ox.getImageData(0,0,G,G).data};
+  // palette from sample frames (4-bit bins, averaged)
+  const cnt=new Float64Array(4096),sr=new Float64Array(4096),sg=new Float64Array(4096),sb=new Float64Array(4096);
+  for(const t of [0,.2,.4,.6,.8,1]){const d=grab(t);for(let i=0;i<d.length;i+=4){if(d[i+3]<128)continue;const k=(d[i]>>4)<<8|(d[i+1]>>4)<<4|(d[i+2]>>4);cnt[k]++;sr[k]+=d[i];sg[k]+=d[i+1];sb[k]+=d[i+2]}}
+  const bins=[...cnt.keys()].filter(k=>cnt[k]>0).sort((a,b)=>cnt[b]-cnt[a]).slice(0,255);
+  const pal=[[0,0,0],...bins.map(k=>[sr[k]/cnt[k],sg[k]/cnt[k],sb[k]/cnt[k]].map(Math.round))];while(pal.length<256)pal.push([0,0,0]);
+  const lut=new Uint8Array(4096);
+  for(let k=0;k<4096;k++){const r=(k>>8)*17,g=(k>>4&15)*17,b=(k&15)*17;let best=1,bd=1e9;for(let p=1;p<=bins.length;p++){const q=pal[p],dd=(q[0]-r)**2+(q[1]-g)**2+(q[2]-b)**2;if(dd<bd){bd=dd;best=p}}lut[k]=best}
+  const out=[];const str=s=>{for(const c of s)out.push(c.charCodeAt(0))},u16=v=>out.push(v&255,v>>8&255);
+  str('GIF89a');u16(G);u16(G);out.push(0xF7,0,0);pal.forEach(c=>out.push(c[0],c[1],c[2]));
+  out.push(0x21,0xFF,0x0B);str('NETSCAPE2.0');out.push(3,1,0,0,0);   // loop marker: apps treat the GIF as animated
+  const idx=new Uint8Array(G*G);
+  for(let f=0;f<nA;f++){
+    const d=grab(f/(nA-1));
+    for(let i=0,p=0;p<idx.length;i+=4,p++)idx[p]=d[i+3]<128?0:lut[(d[i]>>4)<<8|(d[i+1]>>4)<<4|(d[i+2]>>4)];
+    out.push(0x21,0xF9,4,(2<<2)|1);u16(f===nA-1?holdCs:4);out.push(0,0);
+    out.push(0x2C);u16(0);u16(0);u16(G);u16(G);out.push(0);
+    lzwEncode(idx,out);
+    if(f%4==0){status('جاري تجهيز الـ GIF… '+(f+1)+' من '+nA,(f+1)/nA);await new Promise(r=>setTimeout(r))}
+  }
+  out.push(0x3B);
+  render(1);busy(false);
+  await save(new Blob([new Uint8Array(out)],{type:'image/gif'}),'gif');
+}
+$('exGif').onclick=exportGif;
 $('exAlpha').onclick=()=>recordVideo(null);
 $('exGreen').onclick=()=>{const g=parseInt(o.ring.slice(1),16),r=g>>16&255,gg=g>>8&255,b=g&255;recordVideo(gg>r&&gg>b&&gg>120?'#ff00ff':'#00ff00')};
 $('exPng').onclick=exportPng;
